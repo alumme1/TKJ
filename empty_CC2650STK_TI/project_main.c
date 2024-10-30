@@ -15,10 +15,11 @@
 #include <ti/drivers/Power.h>
 #include <ti/drivers/power/PowerCC26XX.h>
 #include <ti/drivers/UART.h>
+#include <ti/drivers/i2c/I2CCC26XX.h>
 
 /* Board Header files */
 #include "Board.h"
-#include "sensors/opt3001.h"
+#include "sensors/mpu9250.h"
 
 /* Task */
 #define STACKSIZE 2048
@@ -40,7 +41,16 @@ static PIN_Handle buttonHandle;
 static PIN_State buttonState;
 static PIN_Handle ledHandle;
 static PIN_State ledState;
-
+static PIN_Handle hMpuPin;
+static PIN_State  MpuPinState;
+static PIN_Config MpuPinConfig[] = {
+    Board_MPU_POWER  | PIN_GPIO_OUTPUT_EN | PIN_GPIO_HIGH | PIN_PUSHPULL | PIN_DRVSTR_MAX,
+    PIN_TERMINATE
+};
+static const I2CCC26XX_I2CPinCfg i2cMPUCfg = {
+    .pinSDA = Board_I2C0_SDA1,
+    .pinSCL = Board_I2C0_SCL1
+};
 // Pinnien alustukset, molemmille pinneille oma konfiguraatio
 // Vakio BOARD_BUTTON_0 vastaa toista painonappia
 PIN_Config buttonConfig[] = {
@@ -90,7 +100,7 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
 
 
     while (1) {
-        System_printf("Current programState: %d\n", programState);
+        //System_printf("Current programState: %d\n", programState);
         System_flush();
         // JTKJ: Teht�v� 3. Kun tila on oikea, tulosta sensoridata merkkijonossa debug-ikkunaan
         //       Muista tilamuutos
@@ -98,17 +108,17 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
         //       Remember to modify state
         if(programState == DATA_READY){
             snprintf(uartBuffer, sizeof(uartBuffer), "%f lux\n\r", ambientLight);
-            System_printf("%s\n", uartBuffer);
+            //System_printf("%s\n", uartBuffer);
             UART_write(handle, uartBuffer, strlen(uartBuffer));
             programState = WAITING;
-            System_printf("State changed to WAITING\n");
+          //  System_printf("State changed to WAITING\n");
             System_flush();
         }
         // JTKJ: Teht�v� 4. L�het� sama merkkijono UARTilla
         // JTKJ: Exercise 4. Send the same sensor data string with UART
 
         // Just for sanity check for exercise, you can comment this out
-        System_printf("uartTask\n");
+        //System_printf("uartTask\n");
         System_flush();
 
         // Once per second, you can modify this
@@ -118,50 +128,64 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
 
 Void sensorTaskFxn(UArg arg0, UArg arg1) {
 
-    I2C_Handle      i2c;
-    I2C_Params      i2cParams;
+    I2C_Handle i2cMPU; // Own i2c-interface for MPU9250 sensor
+    I2C_Params i2cMPUParams;
 
 
 
     // JTKJ: Teht�v� 2. Avaa i2c-v�yl� taskin k�ytt��n
     // JTKJ: Exercise 2. Open the i2c bus
-    I2C_Params_init(&i2cParams);
-    i2cParams.bitRate = I2C_400kHz;
+    I2C_Params_init(&i2cMPUParams);
+        i2cMPUParams.bitRate = I2C_400kHz;
+        // Note the different configuration below
+        i2cMPUParams.custom = (uintptr_t)&i2cMPUCfg;
 
     // Avataan yhteys
-    i2c = I2C_open(Board_I2C_TMP, &i2cParams);
-    if (i2c == NULL) {
-       System_abort("Error Initializing I2C\n");
-    }
-    Task_sleep(1000000/ Clock_tickPeriod);
-    opt3001_setup(&i2c);
-    char buffer[100];
-    // JTKJ: Teht�v� 2. Alusta sensorin OPT3001 setup-funktiolla
-    //       Laita enne funktiokutsua eteen 100ms viive (Task_sleep)
-    // JTKJ: Exercise 2. Setup the OPT3001 sensor for use
-    //       Before calling the setup function, insertt 100ms delay with Task_sleep
+        PIN_setOutputValue(hMpuPin,Board_MPU_POWER, Board_MPU_POWER_ON);
 
+           // Wait 100ms for the MPU sensor to power up
+           Task_sleep(100000 / Clock_tickPeriod);
+           System_printf("MPU9250: Power ON\n");
+           System_flush();
+
+           // MPU open i2c
+           i2cMPU = I2C_open(Board_I2C, &i2cMPUParams);
+           if (i2cMPU == NULL) {
+               System_abort("Error Initializing I2CMPU\n");
+           }
+           System_printf("MPU9250: Setup and calibration...\n");
+
+           System_flush();
+    mpu9250_setup(&i2cMPU);
+    System_printf("MPU9250: Setup and calibration OK\n");
+    System_flush();
+    float ax, ay, az, gx, gy, gz;
+    char buffer[150];
+    uint32_t timestamp;
+    System_printf("time,   acc_x,      acc_y,     acc_z,     gyro_x,   gyro_y,   gyro_z\n");
     while (1) {
 
         // JTKJ: Teht�v� 2. Lue sensorilta dataa ja tulosta se Debug-ikkunaan merkkijonona
         // JTKJ: Exercise 2. Read sensor data and print it to the Debug window as string
+        timestamp = Clock_getTicks() * Clock_tickPeriod / 1000;
+        mpu9250_get_data(&i2cMPU, &ax, &ay, &az, &gx, &gy, &gz);
 
-        ambientLight = opt3001_get_data(&i2c);
-        sprintf(buffer, "%f",ambientLight);
-        System_printf("%s\n", buffer);
+        sprintf(buffer, "%-6u  %-9.4f  %-9.4f  %-9.4f  %-8.4f  %-8.4f  %-8.4f\n",
+                        timestamp, ax, ay, az, gx, gy, gz);
+        System_printf("%s", buffer);
 
         // JTKJ: Teht�v� 3. Tallenna mittausarvo globaaliin muuttujaan
         //       Muista tilamuutos
         // JTKJ: Exercise 3. Save the sensor value into the global variable
         //       Remember to modify state
         programState = DATA_READY;
-        System_printf("State changed to DATA_READY\n");
+        //System_printf("State changed to DATA_READY\n");
         // Just for sanity check for exercise, you can comment this out
-        System_printf("sensorTask\n");
+        //System_printf("sensorTask\n");
         System_flush();
 
         // Once per second, you can modify this
-        Task_sleep(1000000 / Clock_tickPeriod);
+        Task_sleep(200000 / Clock_tickPeriod);
     }
 }
 
@@ -184,6 +208,11 @@ Int main(void) {
     // JTKJ: Teht�v� 4. Ota UART k�ytt��n ohjelmassa
     // JTKJ: Exercise 4. Initialize UART
     Board_initUART();
+    hMpuPin = PIN_open(&MpuPinState, MpuPinConfig);
+        if (hMpuPin == NULL) {
+            System_abort("Pin open failed!");
+        }
+
     // JTKJ: Teht�v� 1. Ota painonappi ja ledi ohjelman k�ytt��n
     //       Muista rekister�id� keskeytyksen k�sittelij� painonapille
     // JTKJ: Exercise 1. Open the button and led pins
