@@ -170,7 +170,7 @@ Void sensorTaskFxn(UArg arg0, UArg arg1) {
         timestamp = Clock_getTicks() * Clock_tickPeriod / 1000;
         mpu9250_get_data(&i2cMPU, &ax, &ay, &az, &gx, &gy, &gz);
 
-        sprintf(buffer, "%-6u  %-9.4f  %-9.4f  %-9.4f  %-8.4f  %-8.4f  %-8.4f\n",
+        sprintf(buffer, ",%-6u  ,%-9.4f  ,%-9.4f  ,%-9.4f  ,%-8.4f  ,%-8.4f  ,%-8.4f\n",
                         timestamp, ax, ay, az, gx, gy, gz);
         System_printf("%s", buffer);
 
