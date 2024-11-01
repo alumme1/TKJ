@@ -23,6 +23,10 @@
 
 /* Task */
 #define STACKSIZE 2048
+#define ACC_Z_THRESHOLD 0.4  // Threshold for upward movement
+#define GYRO_X_THRESHOLD 150
+
+// Global variable to store the last Z-axis value
 Char sensorTaskStack[STACKSIZE];
 Char uartTaskStack[STACKSIZE];
 
@@ -31,9 +35,7 @@ Char uartTaskStack[STACKSIZE];
 enum state { WAITING=1, DATA_READY };
 enum state programState = WAITING;
 
-// JTKJ: Teht�v� 3. Valoisuuden globaali muuttuja
-// JTKJ: Exercise 3. Global variable for ambient light
-double ambientLight = -1000.0;
+String morseString = "";
 
 // JTKJ: Teht�v� 1. Lis�� painonappien RTOS-muuttujat ja alustus
 // JTKJ: Exercise 1. Add pins RTOS-variables and configuration here
@@ -55,8 +57,10 @@ static const I2CCC26XX_I2CPinCfg i2cMPUCfg = {
 // Vakio BOARD_BUTTON_0 vastaa toista painonappia
 PIN_Config buttonConfig[] = {
    Board_BUTTON0  | PIN_INPUT_EN | PIN_PULLUP | PIN_IRQ_NEGEDGE,
+   Board_BUTTON1 | PIN_INPUT_EN | PIN_PULLUP | PIN_IRQ_NEGEDGE,
    PIN_TERMINATE // Asetustaulukko lopetetaan aina tällä vakiolla
 };
+
 
 // Vakio Board_LED0 vastaa toista lediä
 PIN_Config ledConfig[] = {
@@ -73,6 +77,10 @@ void buttonFxn(PIN_Handle handle, PIN_Id pinId) {
        uint_t pinValue = PIN_getOutputValue( Board_LED1 );
        pinValue = !pinValue;
        PIN_setOutputValue( ledHandle, Board_LED1, pinValue );
+       System_printf(" \n");
+       morseString = " ";
+       programState = DATA_READY;
+
 }
 
 /* Task Functions */
@@ -107,7 +115,7 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
         // JTKJ: Exercise 3. Print out sensor data as string to debug window if the state is correct
         //       Remember to modify state
         if(programState == DATA_READY){
-            snprintf(uartBuffer, sizeof(uartBuffer), "%f lux\n\r", ambientLight);
+            snprintf(uartBuffer, sizeof(uartBuffer), "%s\r\n", morseString);
             //System_printf("%s\n", uartBuffer);
             UART_write(handle, uartBuffer, strlen(uartBuffer));
             programState = WAITING;
@@ -162,29 +170,50 @@ Void sensorTaskFxn(UArg arg0, UArg arg1) {
     float ax, ay, az, gx, gy, gz;
     char buffer[150];
     uint32_t timestamp;
-    System_printf("time,   acc_x,      acc_y,     acc_z,     gyro_x,   gyro_y,   gyro_z\n");
+   // System_printf("time,   acc_x,      acc_y,     acc_z,     gyro_x,   gyro_y,   gyro_z\n");
     while (1) {
 
         // JTKJ: Teht�v� 2. Lue sensorilta dataa ja tulosta se Debug-ikkunaan merkkijonona
         // JTKJ: Exercise 2. Read sensor data and print it to the Debug window as string
         timestamp = Clock_getTicks() * Clock_tickPeriod / 1000;
         mpu9250_get_data(&i2cMPU, &ax, &ay, &az, &gx, &gy, &gz);
+        if ((az - 1 > ACC_Z_THRESHOLD) || (az + 1 < -ACC_Z_THRESHOLD)) {
+            morseString = ".";
+            System_printf(".\n");
+            Task_sleep(500000 / Clock_tickPeriod);
 
-        sprintf(buffer, ",%-6u  ,%-9.4f  ,%-9.4f  ,%-9.4f  ,%-8.4f  ,%-8.4f  ,%-8.4f\n",
+            System_flush();
+
+            programState = DATA_READY;
+        }
+        else if ((abs(gx) > GYRO_X_THRESHOLD)) {
+            morseString = "-";
+            System_printf("-\n", timestamp);
+            Task_sleep(500000 / Clock_tickPeriod);
+
+            System_flush();
+
+            programState = DATA_READY;
+        }
+
+
+
+
+       /* sprintf(buffer, ",%-6u  ,%-9.4f  ,%-9.4f  ,%-9.4f  ,%-8.4f  ,%-8.4f  ,%-8.4f\n",
                         timestamp, ax, ay, az, gx, gy, gz);
         System_printf("%s", buffer);
-
+*/
         // JTKJ: Teht�v� 3. Tallenna mittausarvo globaaliin muuttujaan
         //       Muista tilamuutos
         // JTKJ: Exercise 3. Save the sensor value into the global variable
         //       Remember to modify state
-        programState = DATA_READY;
+        //programState = DATA_READY;
         //System_printf("State changed to DATA_READY\n");
         // Just for sanity check for exercise, you can comment this out
         //System_printf("sensorTask\n");
         System_flush();
 
-        // Once per second, you can modify this
+
         Task_sleep(200000 / Clock_tickPeriod);
     }
 }
