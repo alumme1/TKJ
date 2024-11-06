@@ -17,9 +17,13 @@
 #include <ti/drivers/UART.h>
 #include <ti/drivers/i2c/I2CCC26XX.h>
 
-/* Board Header files */
+
 #include "Board.h"
 #include "sensors/mpu9250.h"
+#include "Board.h"
+#include "buzzer.h" // remember to add buzzer.h and buzzer.c into project directory!
+
+
 
 /* Task */
 #define STACKSIZE 2048
@@ -29,6 +33,9 @@
 // Global variable to store the last Z-axis value
 Char sensorTaskStack[STACKSIZE];
 Char uartTaskStack[STACKSIZE];
+Char morseCodeTaskStack[STACKSIZE];
+Task_Handle morseCodeTaskHandle;
+Task_Params morseCodeTaskParams;
 
 // JTKJ: Teht�v� 3. Tilakoneen esittely
 // JTKJ: Exercise 3. Definition of the state machine
@@ -67,7 +74,12 @@ PIN_Config ledConfig[] = {
    Board_LED1 | PIN_GPIO_OUTPUT_EN | PIN_GPIO_LOW | PIN_PUSHPULL | PIN_DRVSTR_MAX,
    PIN_TERMINATE // Asetustaulukko lopetetaan aina tällä vakiolla
 };
-
+static PIN_Handle hBuzzer;
+static PIN_State sBuzzer;
+PIN_Config cBuzzer[] = {
+  Board_BUZZER | PIN_GPIO_OUTPUT_EN | PIN_GPIO_LOW | PIN_PUSHPULL | PIN_DRVSTR_MAX,
+  PIN_TERMINATE
+};
 
 void buttonFxn(PIN_Handle handle, PIN_Id pinId) {
 
@@ -83,54 +95,121 @@ void buttonFxn(PIN_Handle handle, PIN_Id pinId) {
 
 }
 
+char messageBuffer[100];
+int messageIndex = 0;
+volatile bool processMorse = false;
+
+void uartReadCallback(UART_Handle handle, void *buf, size_t count) {
+    if (count > 0) {
+        char receivedByte = ((char *)buf)[0];
+
+        // Append the received byte to messageBuffer
+        if (messageIndex < sizeof(messageBuffer) - 1) {
+            messageBuffer[messageIndex++] = receivedByte;
+        }
+
+        // Check if this byte is the end of a message (e.g., '\n' or '\r')
+        if (receivedByte == '\n') {
+            messageBuffer[messageIndex] = '\0';  // Null-terminate the message
+            System_printf("Complete message received: %s\n", messageBuffer);
+            System_flush();
+
+            // Set flag for Morse code processing
+            processMorse = true;
+
+            // Reset message index for the next message
+            messageIndex = 0;
+        }
+
+        // Restart reading for the next byte
+        UART_read(handle, buf, 1);  // Read one byte at a time
+    }
+}
+void morseCodeTask(UArg arg0, UArg arg1) {
+
+    while (1) {
+        // Wait until processMorse is set by uartReadCallback
+        if (processMorse) {
+            // Clear flag to avoid repeated processing
+            processMorse = false;
+
+            // Open the buzzer for Morse code output
+            buzzerOpen(hBuzzer);
+            int i = 0;
+            // Process each character in messageBuffer for beeping
+            for (i = 0; messageBuffer[i] != '\0'; i++) {
+                if (messageBuffer[i] == '.') {
+                    // Short beep for dot
+                    //System_printf("xxxxxxxxxxxxxxxxxxxxxxx\n");
+                    buzzerSetFrequency(2000);  // Set frequency for beep
+                    Task_sleep(50000 / Clock_tickPeriod);  // Short beep duration
+                    buzzerSetFrequency(0);  // Turn off buzzer
+                    Task_sleep(50000 / Clock_tickPeriod);  // Short silence after dot
+                } else if (messageBuffer[i] == '-') {
+                    // Long beep for dash
+                    buzzerSetFrequency(2000);  // Set frequency for beep
+                    Task_sleep(500000 / Clock_tickPeriod);  // Long beep duration
+                    buzzerSetFrequency(0);  // Turn off buzzer
+                    Task_sleep(50000 / Clock_tickPeriod);  // Short silence after dash
+                } else if (messageBuffer[i] == ' ') {
+                    // Longer pause between words
+                    Task_sleep(300000 / Clock_tickPeriod);  // Silence between words
+                }
+            }
+
+            // Close the buzzer after completing the message
+            buzzerClose();
+        }
+
+        // Sleep briefly to yield CPU (optional)
+        Task_sleep(10000);  // Adjust as needed for system requirements
+    }
+}
+
 /* Task Functions */
 Void uartTaskFxn(UArg arg0, UArg arg1) {
-
-    // JTKJ: Teht�v� 4. Lis�� UARTin alustus: 9600,8n1
-    // JTKJ: Exercise 4. Setup here UART connection as 9600,8n1
-    char uartBuffer[100];
+    char uartWriteBuffer[100];
+    char uartReadBuffer[1];  // Single-byte buffer for reading
     UART_Handle handle;
     UART_Params params;
 
     UART_Params_init(&params);
     params.baudRate = 9600;
-    params.dataLength = UART_LEN_8; // 8
-    params.parityType = UART_PAR_NONE; // n
-    params.stopBits = UART_STOP_ONE; // 1
-    params.readDataMode  = UART_DATA_TEXT;
+    params.dataLength = UART_LEN_8;
+    params.parityType = UART_PAR_NONE;
+    params.stopBits = UART_STOP_ONE;
+    params.readDataMode = UART_DATA_TEXT;
     params.writeDataMode = UART_DATA_TEXT;
     params.readEcho = UART_ECHO_OFF;
-    params.readMode=UART_MODE_BLOCKING;
+
+    // Set read mode to non-blocking callback
+    params.readMode = UART_MODE_CALLBACK;
+    params.readCallback = uartReadCallback;
+
     handle = UART_open(Board_UART, &params);
     if (handle == NULL) {
-          System_abort("Error opening the UART");
-       }
+        System_abort("Error opening the UART");
+    }
 
+    // Start reading one byte at a time
+    UART_read(handle, uartReadBuffer, 1);
 
     while (1) {
-        //System_printf("Current programState: %d\n", programState);
-        System_flush();
-        // JTKJ: Teht�v� 3. Kun tila on oikea, tulosta sensoridata merkkijonossa debug-ikkunaan
-        //       Muista tilamuutos
-        // JTKJ: Exercise 3. Print out sensor data as string to debug window if the state is correct
-        //       Remember to modify state
-        if(programState == DATA_READY){
-            snprintf(uartBuffer, sizeof(uartBuffer), "%s\r\n", morseString);
-            //System_printf("%s\n", uartBuffer);
-            UART_write(handle, uartBuffer, strlen(uartBuffer));
-            programState = WAITING;
-          //  System_printf("State changed to WAITING\n");
+        if (programState == DATA_READY) {
+            snprintf(uartWriteBuffer, sizeof(uartWriteBuffer), "%s\r\n\0", morseString);
+            System_printf("Sending to UART: %s\n", uartWriteBuffer);
             System_flush();
+
+            UART_write(handle, uartWriteBuffer, strlen(uartWriteBuffer)+1);
+          /* if (UART_write(handle, uartWriteBuffer, strlen(uartWriteBuffer)) != UART_STATUS_SUCCESS) {
+                            System_printf("UART write failed\n");
+                        } else {
+                            System_printf("UART write succeeded\n");
+                        }*/
+            programState = WAITING;
         }
-        // JTKJ: Teht�v� 4. L�het� sama merkkijono UARTilla
-        // JTKJ: Exercise 4. Send the same sensor data string with UART
 
-        // Just for sanity check for exercise, you can comment this out
-        //System_printf("uartTask\n");
-        System_flush();
-
-        // Once per second, you can modify this
-        Task_sleep(1000000 / Clock_tickPeriod);
+        Task_sleep(1000000 / Clock_tickPeriod);  // Control loop frequency
     }
 }
 
@@ -228,8 +307,13 @@ Int main(void) {
 
     // Initialize board
     Board_initGeneral();
-
     
+    //Otetaan buzzer käyttöön ohjelmassa
+    hBuzzer = PIN_open(&sBuzzer, cBuzzer);
+      if (hBuzzer == NULL) {
+        System_abort("Pin open failed!");
+      }
+
     // JTKJ: Teht�v� 2. Ota i2c-v�yl� k�ytt��n ohjelmassa
     // JTKJ: Exercise 2. Initialize i2c bus
     Board_initI2C();
@@ -280,6 +364,15 @@ Int main(void) {
     if (uartTaskHandle == NULL) {
         System_abort("Task create failed!");
     }
+    /* Create the Morse code task */
+        Task_Params_init(&morseCodeTaskParams);
+        morseCodeTaskParams.stackSize = STACKSIZE;
+        morseCodeTaskParams.stack = &morseCodeTaskStack;
+        morseCodeTaskParams.priority = 2;  // Set appropriate priority
+        morseCodeTaskHandle = Task_create(morseCodeTask, &morseCodeTaskParams, NULL);
+        if (morseCodeTaskHandle == NULL) {
+            System_abort("Task create failed!");
+        }
 
     /* Sanity check */
     System_printf("Hello world!\n");
