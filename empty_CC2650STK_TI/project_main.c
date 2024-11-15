@@ -42,7 +42,7 @@ Task_Params morseCodeTaskParams;
 enum state { WAITING=1, DATA_READY };
 enum state programState = WAITING;
 
-String morseString = "";
+char morseChar;
 
 // JTKJ: Teht�v� 1. Lis�� painonappien RTOS-muuttujat ja alustus
 // JTKJ: Exercise 1. Add pins RTOS-variables and configuration here
@@ -89,9 +89,15 @@ void buttonFxn(PIN_Handle handle, PIN_Id pinId) {
        uint_t pinValue = PIN_getOutputValue( Board_LED1 );
        pinValue = !pinValue;
        PIN_setOutputValue( ledHandle, Board_LED1, pinValue );
-       System_printf(" \n");
-       morseString = " ";
+       System_printf("Button pressed\n");
+       System_flush();
+
+
+       morseChar = ' ';
+
        programState = DATA_READY;
+
+
 
 }
 
@@ -111,7 +117,7 @@ void uartReadCallback(UART_Handle handle, void *buf, size_t count) {
         // Check if this byte is the end of a message (e.g., '\n' or '\r')
         if (receivedByte == '\n') {
             messageBuffer[messageIndex] = '\0';  // Null-terminate the message
-            System_printf("Complete message received: %s\n", messageBuffer);
+            System_printf("Complete message received: %c\n", messageBuffer);
             System_flush();
 
             // Set flag for Morse code processing
@@ -168,7 +174,7 @@ void morseCodeTask(UArg arg0, UArg arg1) {
 
 /* Task Functions */
 Void uartTaskFxn(UArg arg0, UArg arg1) {
-    char uartWriteBuffer[100];
+    char uartWriteBuffer[4];
     char uartReadBuffer[1];  // Single-byte buffer for reading
     UART_Handle handle;
     UART_Params params;
@@ -196,16 +202,16 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
 
     while (1) {
         if (programState == DATA_READY) {
-            snprintf(uartWriteBuffer, sizeof(uartWriteBuffer), "%s\r\n\0", morseString);
-            System_printf("Sending to UART: %s\n", uartWriteBuffer);
+            System_printf("Sent: '%c'\n", morseChar);
+            System_flush();
+            snprintf(uartWriteBuffer, sizeof(uartWriteBuffer), "%c\r\n\0", morseChar);
+            System_printf("Sent to UART: '%c'\n", morseChar);
+            System_printf("Sending to UART: %s", uartWriteBuffer);
             System_flush();
 
             UART_write(handle, uartWriteBuffer, strlen(uartWriteBuffer)+1);
-          /* if (UART_write(handle, uartWriteBuffer, strlen(uartWriteBuffer)) != UART_STATUS_SUCCESS) {
-                            System_printf("UART write failed\n");
-                        } else {
-                            System_printf("UART write succeeded\n");
-                        }*/
+
+
             programState = WAITING;
         }
 
@@ -257,22 +263,24 @@ Void sensorTaskFxn(UArg arg0, UArg arg1) {
         timestamp = Clock_getTicks() * Clock_tickPeriod / 1000;
         mpu9250_get_data(&i2cMPU, &ax, &ay, &az, &gx, &gy, &gz);
         if ((az - 1 > ACC_Z_THRESHOLD) || (az + 1 < -ACC_Z_THRESHOLD)) {
-            morseString = ".";
+            morseChar = '.';
             System_printf(".\n");
-            Task_sleep(500000 / Clock_tickPeriod);
+
 
             System_flush();
 
             programState = DATA_READY;
+            Task_sleep(500000 / Clock_tickPeriod);
         }
         else if ((abs(gx) > GYRO_X_THRESHOLD)) {
-            morseString = "-";
+            morseChar = '-';
             System_printf("-\n", timestamp);
-            Task_sleep(500000 / Clock_tickPeriod);
+
 
             System_flush();
 
             programState = DATA_READY;
+            Task_sleep(500000 / Clock_tickPeriod);
         }
 
 
