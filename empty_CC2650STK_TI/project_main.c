@@ -25,27 +25,34 @@
 
 
 
-/* Task */
-#define STACKSIZE 2048
-#define ACC_Z_THRESHOLD 0.4  // Threshold for upward movement
-#define GYRO_X_THRESHOLD 150
 
-// Global variable to store the last Z-axis value
+#define STACKSIZE 2048 //Stackin koko
+#define ACC_Z_THRESHOLD 0.4  // Kiihtyvyysanturin Z-akselin kynnysarvo ylöspäin liikkeelle
+#define GYRO_X_THRESHOLD 150 // Gyroskoopin X-akselin kynnysarvo
+
+// Globaalit muuttujat eri taskien pinoille
 Char sensorTaskStack[STACKSIZE];
 Char uartTaskStack[STACKSIZE];
 Char morseCodeTaskStack[STACKSIZE];
 Task_Handle morseCodeTaskHandle;
 Task_Params morseCodeTaskParams;
 
-// JTKJ: Teht�v� 3. Tilakoneen esittely
-// JTKJ: Exercise 3. Definition of the state machine
+Char ledFlashTaskStack[STACKSIZE];
+Task_Handle ledFlashTaskHandle;
+Task_Params ledFlashTaskParams;
+
+// Shared flag for LED flashing
+volatile bool flashLed = false;
+
+
+//Tilakoneeseen liittyvät tilat
 enum state { WAITING=1, DATA_READY };
 enum state programState = WAITING;
 
+// Merkkimuuttuja tallentamaan Morse-merkkejä
 char morseChar;
 
-// JTKJ: Teht�v� 1. Lis�� painonappien RTOS-muuttujat ja alustus
-// JTKJ: Exercise 1. Add pins RTOS-variables and configuration here
+// Painonapin ja LEDin RTOS-muuttujat ja konfiguraatio
 static PIN_Handle buttonHandle;
 static PIN_State buttonState;
 static PIN_Handle ledHandle;
@@ -56,24 +63,25 @@ static PIN_Config MpuPinConfig[] = {
     Board_MPU_POWER  | PIN_GPIO_OUTPUT_EN | PIN_GPIO_HIGH | PIN_PUSHPULL | PIN_DRVSTR_MAX,
     PIN_TERMINATE
 };
+// MPU9250:n I2C-konfiguraatio
 static const I2CCC26XX_I2CPinCfg i2cMPUCfg = {
     .pinSDA = Board_I2C0_SDA1,
     .pinSCL = Board_I2C0_SCL1
 };
-// Pinnien alustukset, molemmille pinneille oma konfiguraatio
-// Vakio BOARD_BUTTON_0 vastaa toista painonappia
+// Painonapin konfiguraatiot
 PIN_Config buttonConfig[] = {
    Board_BUTTON0  | PIN_INPUT_EN | PIN_PULLUP | PIN_IRQ_NEGEDGE,
    Board_BUTTON1 | PIN_INPUT_EN | PIN_PULLUP | PIN_IRQ_NEGEDGE,
-   PIN_TERMINATE // Asetustaulukko lopetetaan aina tällä vakiolla
+   PIN_TERMINATE
 };
 
 
-// Vakio Board_LED0 vastaa toista lediä
+// LEDin konfiguraatiot
 PIN_Config ledConfig[] = {
    Board_LED1 | PIN_GPIO_OUTPUT_EN | PIN_GPIO_LOW | PIN_PUSHPULL | PIN_DRVSTR_MAX,
-   PIN_TERMINATE // Asetustaulukko lopetetaan aina tällä vakiolla
+   PIN_TERMINATE
 };
+// Summerin konfiguraatiot
 static PIN_Handle hBuzzer;
 static PIN_State sBuzzer;
 PIN_Config cBuzzer[] = {
@@ -81,101 +89,102 @@ PIN_Config cBuzzer[] = {
   PIN_TERMINATE
 };
 
+
+
+/* Painonapin keskeytyskäsittelijä */
 void buttonFxn(PIN_Handle handle, PIN_Id pinId) {
+    System_printf("Button pressed\n");
+    System_flush();
 
-    // JTKJ: Teht�v� 1. Vilkuta jompaa kumpaa ledi�
-    // JTKJ: Exercise 1. Blink either led of the device
-    // Vaihdetaan led-pinnin tilaa negaatiolla
-       uint_t pinValue = PIN_getOutputValue( Board_LED1 );
-       pinValue = !pinValue;
-       PIN_setOutputValue( ledHandle, Board_LED1, pinValue );
-       System_printf("Button pressed\n");
-       System_flush();
+    flashLed = true;  // Aseta lippu LED-välähdyksen käynnistämiseksi LED-taskissa
 
-
-       morseChar = ' ';
-
-       programState = DATA_READY;
-
-
-
+    morseChar = ' ';
+    programState = DATA_READY;  // Vaihda ohjelman tila
 }
 
+/* LED-välähdystaskin toteutus */
+Void ledFlashTask(UArg arg0, UArg arg1) {
+    while (1) {
+        if (flashLed) {
+            flashLed = false;  // Tyhjennä lippu, jotta välähdys ei toistu jatkuvasti
+
+            // Sytytä LED
+            PIN_setOutputValue(ledHandle, Board_LED1, 1);
+            Task_sleep(50000 / Clock_tickPeriod);
+
+            // Sammuta LED
+            PIN_setOutputValue(ledHandle, Board_LED1, 0);
+        }
+
+        Task_sleep(10000 / Clock_tickPeriod);
+    }
+}
+
+char receivedByte;  // Staattinen muuttuja vastaanotetulle tavulle
 char messageBuffer[100];
 int messageIndex = 0;
 volatile bool processMorse = false;
 
-void uartReadCallback(UART_Handle handle, void *buf, size_t count) {
+void uartReadCallback(UART_Handle handle, size_t count) {
     if (count > 0) {
-        char receivedByte = ((char *)buf)[0];
-
-        // Append the received byte to messageBuffer
+        // Jos puskuri ei ole täynnä, lisää merkki puskuriin
         if (messageIndex < sizeof(messageBuffer) - 1) {
             messageBuffer[messageIndex++] = receivedByte;
         }
 
-        // Check if this byte is the end of a message (e.g., '\n' or '\r')
+        // Tarkista, onko viesti valmis
         if (receivedByte == '\n') {
-            messageBuffer[messageIndex] = '\0';  // Null-terminate the message
-            System_printf("Complete message received: %c\n", messageBuffer);
-            System_flush();
-
-            // Set flag for Morse code processing
-            processMorse = true;
-
-            // Reset message index for the next message
-            messageIndex = 0;
+            processMorse = true;  // Aseta lippu Morse-koodin käsittelylle
+            messageIndex = 0;     // Nollaa viestipuskuri seuraavaa viestiä varten
         }
 
-        // Restart reading for the next byte
-        UART_read(handle, buf, 1);  // Read one byte at a time
+        UART_read(handle, &receivedByte, 1);  // Aloita uuden merkin lukeminen
     }
 }
+
+/* Morse-kooditaskin toteutus */
 void morseCodeTask(UArg arg0, UArg arg1) {
 
     while (1) {
-        // Wait until processMorse is set by uartReadCallback
+        // Odota kunnes processMorse on asetettu uartReadCallback:ssä
         if (processMorse) {
-            // Clear flag to avoid repeated processing
+            // Tyhjennä lippu estääksesi uudelleenkäsittelyn
             processMorse = false;
 
-            // Open the buzzer for Morse code output
+            // Avaa summeri Morse-koodin toistoa varten
             buzzerOpen(hBuzzer);
             int i = 0;
-            // Process each character in messageBuffer for beeping
+            // Käsittele jokainen merkki messageBufferista ja piippaa vastaavasti
             for (i = 0; messageBuffer[i] != '\0'; i++) {
                 if (messageBuffer[i] == '.') {
-                    // Short beep for dot
-                    //System_printf("xxxxxxxxxxxxxxxxxxxxxxx\n");
-                    buzzerSetFrequency(2000);  // Set frequency for beep
-                    Task_sleep(50000 / Clock_tickPeriod);  // Short beep duration
-                    buzzerSetFrequency(0);  // Turn off buzzer
-                    Task_sleep(50000 / Clock_tickPeriod);  // Short silence after dot
+                    // Lyhyt piippaus pisteelle
+                    buzzerSetFrequency(2000);
+                    Task_sleep(50000 / Clock_tickPeriod);
+                    buzzerSetFrequency(0);
+                    Task_sleep(50000 / Clock_tickPeriod);
                 } else if (messageBuffer[i] == '-') {
-                    // Long beep for dash
-                    buzzerSetFrequency(2000);  // Set frequency for beep
-                    Task_sleep(500000 / Clock_tickPeriod);  // Long beep duration
-                    buzzerSetFrequency(0);  // Turn off buzzer
-                    Task_sleep(50000 / Clock_tickPeriod);  // Short silence after dash
+                    // Pitkä piippaus viivalle
+                    buzzerSetFrequency(2000);
+                    Task_sleep(500000 / Clock_tickPeriod);
+                    buzzerSetFrequency(0);
+                    Task_sleep(50000 / Clock_tickPeriod);
                 } else if (messageBuffer[i] == ' ') {
-                    // Longer pause between words
-                    Task_sleep(300000 / Clock_tickPeriod);  // Silence between words
+                    // Tauko merkkien välissä
+                    Task_sleep(300000 / Clock_tickPeriod);
                 }
             }
 
-            // Close the buzzer after completing the message
+            // Sulje summeri viestin käsittelyn jälkeen
             buzzerClose();
         }
-
-        // Sleep briefly to yield CPU (optional)
-        Task_sleep(10000);  // Adjust as needed for system requirements
+        Task_sleep(10000);
     }
 }
 
-/* Task Functions */
+/* UART-taskin toteutus */
 Void uartTaskFxn(UArg arg0, UArg arg1) {
     char uartWriteBuffer[4];
-    char uartReadBuffer[1];  // Single-byte buffer for reading
+    char uartReadBuffer[1];  // Yhden tavun puskuriluku
     UART_Handle handle;
     UART_Params params;
 
@@ -187,8 +196,6 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
     params.readDataMode = UART_DATA_TEXT;
     params.writeDataMode = UART_DATA_TEXT;
     params.readEcho = UART_ECHO_OFF;
-
-    // Set read mode to non-blocking callback
     params.readMode = UART_MODE_CALLBACK;
     params.readCallback = uartReadCallback;
 
@@ -197,15 +204,12 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
         System_abort("Error opening the UART");
     }
 
-    // Start reading one byte at a time
+    // Aloita yhden tavun lukeminen kerrallaan
     UART_read(handle, uartReadBuffer, 1);
 
     while (1) {
         if (programState == DATA_READY) {
-            System_printf("Sent: '%c'\n", morseChar);
-            System_flush();
-            snprintf(uartWriteBuffer, sizeof(uartWriteBuffer), "%c\r\n\0", morseChar);
-            System_printf("Sent to UART: '%c'\n", morseChar);
+            snprintf(uartWriteBuffer, sizeof(uartWriteBuffer), "%c\r\n\0", morseChar);;
             System_printf("Sending to UART: %s", uartWriteBuffer);
             System_flush();
 
@@ -215,91 +219,73 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
             programState = WAITING;
         }
 
-        Task_sleep(1000000 / Clock_tickPeriod);  // Control loop frequency
+        Task_sleep(1000000 / Clock_tickPeriod);
     }
 }
-
+/* Sensor-taskin toteutus */
 Void sensorTaskFxn(UArg arg0, UArg arg1) {
 
-    I2C_Handle i2cMPU; // Own i2c-interface for MPU9250 sensor
+    I2C_Handle i2cMPU; // Oma I2C-yhteys MPU9250-anturia varten
     I2C_Params i2cMPUParams;
 
-
-
-    // JTKJ: Teht�v� 2. Avaa i2c-v�yl� taskin k�ytt��n
-    // JTKJ: Exercise 2. Open the i2c bus
+    // Alusta I2C-väylä tehtävän käyttöön
     I2C_Params_init(&i2cMPUParams);
         i2cMPUParams.bitRate = I2C_400kHz;
-        // Note the different configuration below
         i2cMPUParams.custom = (uintptr_t)&i2cMPUCfg;
 
     // Avataan yhteys
-        PIN_setOutputValue(hMpuPin,Board_MPU_POWER, Board_MPU_POWER_ON);
+    PIN_setOutputValue(hMpuPin,Board_MPU_POWER, Board_MPU_POWER_ON);
 
-           // Wait 100ms for the MPU sensor to power up
-           Task_sleep(100000 / Clock_tickPeriod);
-           System_printf("MPU9250: Power ON\n");
-           System_flush();
+    // Odota 100 ms, että MPU-anturi käynnistyy
+    Task_sleep(100000 / Clock_tickPeriod);
+    System_printf("MPU9250: Power ON\n");
+    System_flush();
 
-           // MPU open i2c
-           i2cMPU = I2C_open(Board_I2C, &i2cMPUParams);
-           if (i2cMPU == NULL) {
-               System_abort("Error Initializing I2CMPU\n");
-           }
-           System_printf("MPU9250: Setup and calibration...\n");
+    // MPU:n avaaminen I2C:lle
+    i2cMPU = I2C_open(Board_I2C, &i2cMPUParams);
+    if (i2cMPU == NULL) {
+        System_abort("Error Initializing I2CMPU\n");
+    }
+    System_printf("MPU9250: Setup and calibration...\n");
+    System_flush();
 
-           System_flush();
     mpu9250_setup(&i2cMPU);
     System_printf("MPU9250: Setup and calibration OK\n");
     System_flush();
+    // Muuttujat kiihtyvyys- ja gyroskooppiarvoille
     float ax, ay, az, gx, gy, gz;
-    char buffer[150];
-    uint32_t timestamp;
-   // System_printf("time,   acc_x,      acc_y,     acc_z,     gyro_x,   gyro_y,   gyro_z\n");
-    while (1) {
 
-        // JTKJ: Teht�v� 2. Lue sensorilta dataa ja tulosta se Debug-ikkunaan merkkijonona
-        // JTKJ: Exercise 2. Read sensor data and print it to the Debug window as string
-        timestamp = Clock_getTicks() * Clock_tickPeriod / 1000;
+    while (1) {
+        // Lue data MPU9250-sensorilta
         mpu9250_get_data(&i2cMPU, &ax, &ay, &az, &gx, &gy, &gz);
+        // Tarkista Z-akselin kiihtyvyysarvo ylöspäin nykäisyn varalle
         if ((az - 1 > ACC_Z_THRESHOLD) || (az + 1 < -ACC_Z_THRESHOLD)) {
             morseChar = '.';
-            System_printf(".\n");
-
-
-            System_flush();
-
+            // Toista lyhyt piippaus pisteelle
+            buzzerOpen(hBuzzer);
+            buzzerSetFrequency(2000);
+            Task_sleep(50000 / Clock_tickPeriod);
+            buzzerSetFrequency(0);
+            buzzerClose();
+            // Päivitä ohjelman tila
             programState = DATA_READY;
+            // Odota ennen seuraavaa tarkistusta (500 ms)
             Task_sleep(500000 / Clock_tickPeriod);
         }
+        // Tarkista gyroskoopin X-akselin arvo laitteen kääntöliikettä varten
         else if ((abs(gx) > GYRO_X_THRESHOLD)) {
             morseChar = '-';
-            System_printf("-\n", timestamp);
-
-
-            System_flush();
-
+            // Toista pitkä piippaus viivalle
+            buzzerOpen(hBuzzer);
+            buzzerSetFrequency(2000);
+            Task_sleep(400000 / Clock_tickPeriod);
+            buzzerSetFrequency(0);
+            buzzerClose();
+            // Päivitä ohjelman tila
             programState = DATA_READY;
+            // Odota ennen seuraavaa tarkistusta (500 ms)
             Task_sleep(500000 / Clock_tickPeriod);
         }
-
-
-
-
-       /* sprintf(buffer, ",%-6u  ,%-9.4f  ,%-9.4f  ,%-9.4f  ,%-8.4f  ,%-8.4f  ,%-8.4f\n",
-                        timestamp, ax, ay, az, gx, gy, gz);
-        System_printf("%s", buffer);
-*/
-        // JTKJ: Teht�v� 3. Tallenna mittausarvo globaaliin muuttujaan
-        //       Muista tilamuutos
-        // JTKJ: Exercise 3. Save the sensor value into the global variable
-        //       Remember to modify state
-        //programState = DATA_READY;
-        //System_printf("State changed to DATA_READY\n");
-        // Just for sanity check for exercise, you can comment this out
-        //System_printf("sensorTask\n");
-        System_flush();
-
 
         Task_sleep(200000 / Clock_tickPeriod);
     }
@@ -381,6 +367,15 @@ Int main(void) {
         if (morseCodeTaskHandle == NULL) {
             System_abort("Task create failed!");
         }
+        Task_Params_init(&ledFlashTaskParams);
+        ledFlashTaskParams.stackSize = STACKSIZE;
+        ledFlashTaskParams.stack = &ledFlashTaskStack;
+        ledFlashTaskParams.priority = 1;  // Low-priority task
+        ledFlashTaskHandle = Task_create(ledFlashTask, &ledFlashTaskParams, NULL);
+        if (ledFlashTaskHandle == NULL) {
+            System_abort("LED Flash Task create failed!");
+        }
+
 
     /* Sanity check */
     System_printf("Hello world!\n");
