@@ -26,7 +26,7 @@
 
 
 #define STACKSIZE 2048 //Stackin koko
-#define ACC_Z_THRESHOLD 0.4  // Kiihtyvyysanturin Z-akselin kynnysarvo ylöspäin liikkeelle
+#define ACC_Z_THRESHOLD 0.2  // Kiihtyvyysanturin Z-akselin kynnysarvo ylöspäin liikkeelle
 #define GYRO_X_THRESHOLD 150 // Gyroskoopin X-akselin kynnysarvo
 
 // Globaalit muuttujat eri taskien pinoille
@@ -37,7 +37,7 @@ Char ledFlashTaskStack[STACKSIZE];
 
 
 //Tilakoneeseen liittyvät tilat
-enum state { WAITING=1, DATA_READY, RECEIVING_DATA};
+enum state { WAITING=1, DATA_READY, MESSAGE_RECEIVED};
 enum state programState = WAITING;
 
 // Merkkimuuttuja tallentamaan Morse-merkkejä
@@ -73,9 +73,9 @@ PIN_Config ledConfig[] = {
    PIN_TERMINATE
 };
 // Summerin konfiguraatiot
-static PIN_Handle hBuzzer;
-static PIN_State sBuzzer;
-PIN_Config cBuzzer[] = {
+static PIN_Handle buzzerHandle;
+static PIN_State buzzerState;
+PIN_Config buzzerConfig[] = {
   Board_BUZZER | PIN_GPIO_OUTPUT_EN | PIN_GPIO_LOW | PIN_PUSHPULL | PIN_DRVSTR_MAX,
   PIN_TERMINATE
 };
@@ -87,7 +87,7 @@ void buttonFxn(PIN_Handle handle, PIN_Id pinId) {
     System_flush();
 
     morseChar = ' ';
-    programState = DATA_READY;  // Vaihda ohjelman tila
+    programState = DATA_READY;  // Vaihdetaan ohjelman tila valmiiksi datan lähetykselle ja ledin väläytykselle
 }
 
 
@@ -99,7 +99,7 @@ Void ledFlashTask(UArg arg0, UArg arg1) {
 
             // Sytytä LED
             PIN_setOutputValue(ledHandle, Board_LED1, 1);
-            Task_sleep(50000 / Clock_tickPeriod);
+            Task_sleep(10000 / Clock_tickPeriod);
 
             // Sammuta LED
             PIN_setOutputValue(ledHandle, Board_LED1, 0);
@@ -122,7 +122,7 @@ void uartReadCallback(UART_Handle handle, size_t count) {
 
         // Tarkista, onko viesti valmis
         if (receivedByte == '\n') {
-            programState = RECEIVING_DATA;  // Asetaan tila valmiiksi Morse-koodin käsittelylle
+            programState = MESSAGE_RECEIVED;  // Asetaan tila valmiiksi Morse-koodin käsittelylle
             messageIndex = 0;     // Nollaa viestipuskuri seuraavaa viestiä varten
         }
 
@@ -135,12 +135,11 @@ void morseCodeTask(UArg arg0, UArg arg1) {
 
     while (1) {
         // Odota kunnes tila on asetettu uartReadCallback:ssä
-        if (programState == RECEIVING_DATA) {
+        if (programState == MESSAGE_RECEIVED) {
             // Asetaan tila odotukseski estääksesi uudelleenkäsittelyn
             programState = WAITING;
 
-            // Avaa summeri Morse-koodin toistoa varten
-            buzzerOpen(hBuzzer);
+
             int i = 0;
             // Käsittele jokainen merkki messageBufferista ja piippaa vastaavasti
             for (i = 0; messageBuffer[i] != '\0'; i++) {
@@ -162,8 +161,7 @@ void morseCodeTask(UArg arg0, UArg arg1) {
                 }
             }
 
-            // Sulje summeri viestin käsittelyn jälkeen
-            buzzerClose();
+
         }
         Task_sleep(10000);
     }
@@ -244,35 +242,42 @@ Void sensorTaskFxn(UArg arg0, UArg arg1) {
     float ax, ay, az, gx, gy, gz;
 
     while (1) {
+
         // Lue data MPU9250-sensorilta
         mpu9250_get_data(&i2cMPU, &ax, &ay, &az, &gx, &gy, &gz);
+        printf("%f, %f\n", az - 1, az + 1);
+
         // Tarkista Z-akselin kiihtyvyysarvo ylöspäin nykäisyn varalle
         if ((az - 1 > ACC_Z_THRESHOLD) || (az + 1 < -ACC_Z_THRESHOLD)) {
             morseChar = '.';
+            // Päivitä ohjelman tila valmiiksi ledin välähdykselle ja merkin lähettämiselle
+            programState = DATA_READY;
             // Toista lyhyt piippaus pisteelle
-            buzzerOpen(hBuzzer);
+
             buzzerSetFrequency(2000);
             Task_sleep(50000 / Clock_tickPeriod);
             buzzerSetFrequency(0);
-            buzzerClose();
-            // Päivitä ohjelman tila
-            programState = DATA_READY;
-            // Odota ennen seuraavaa tarkistusta (500 ms)
-            Task_sleep(500000 / Clock_tickPeriod);
+
+
+
+            // Odota ennen seuraavaa tarkistusta (50ms + 400ms= 450 ms)
+            Task_sleep(400000 / Clock_tickPeriod);
         }
         // Tarkista gyroskoopin X-akselin arvo laitteen kääntöliikettä varten
         else if ((abs(gx) > GYRO_X_THRESHOLD)) {
             morseChar = '-';
+            // Päivitä ohjelman tila valmiiksi ledin välähdykselle ja merkin lähettämiselle
+            programState = DATA_READY;
             // Toista pitkä piippaus viivalle
-            buzzerOpen(hBuzzer);
+
             buzzerSetFrequency(2000);
             Task_sleep(400000 / Clock_tickPeriod);
             buzzerSetFrequency(0);
-            buzzerClose();
-            // Päivitä ohjelman tila
-            programState = DATA_READY;
-            // Odota ennen seuraavaa tarkistusta (500 ms)
-            Task_sleep(500000 / Clock_tickPeriod);
+
+
+
+            // Odota ennen seuraavaa tarkistusta (400ms + 50ms= 450 ms)
+            Task_sleep(50000 / Clock_tickPeriod);
         }
 
         Task_sleep(200000 / Clock_tickPeriod);
@@ -295,11 +300,12 @@ Int main(void) {
     // Initialize board
     Board_initGeneral();
     
-    //Otetaan buzzer käyttöön ohjelmassa
-    hBuzzer = PIN_open(&sBuzzer, cBuzzer);
-      if (hBuzzer == NULL) {
+    //Otetaan buzzer käyttöön ohjelmassa ja avataan se
+    buzzerHandle = PIN_open(&buzzerState, buzzerConfig);
+      if (buzzerHandle == NULL) {
         System_abort("Pin open failed!");
       }
+      buzzerOpen(buzzerHandle);
 
     // Initializing i2c bus
     Board_initI2C();
