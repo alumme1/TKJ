@@ -21,8 +21,7 @@
 #include "Board.h"
 #include "sensors/mpu9250.h"
 #include "Board.h"
-#include "buzzer.h" // remember to add buzzer.h and buzzer.c into project directory!
-
+#include "buzzer.h"
 
 
 
@@ -34,19 +33,11 @@
 Char sensorTaskStack[STACKSIZE];
 Char uartTaskStack[STACKSIZE];
 Char morseCodeTaskStack[STACKSIZE];
-Task_Handle morseCodeTaskHandle;
-Task_Params morseCodeTaskParams;
-
 Char ledFlashTaskStack[STACKSIZE];
-Task_Handle ledFlashTaskHandle;
-Task_Params ledFlashTaskParams;
-
-// Shared flag for LED flashing
-volatile bool flashLed = false;
 
 
 //Tilakoneeseen liittyvät tilat
-enum state { WAITING=1, DATA_READY };
+enum state { WAITING=1, DATA_READY, RECEIVING_DATA};
 enum state programState = WAITING;
 
 // Merkkimuuttuja tallentamaan Morse-merkkejä
@@ -90,23 +81,21 @@ PIN_Config cBuzzer[] = {
 };
 
 
-
 /* Painonapin keskeytyskäsittelijä */
 void buttonFxn(PIN_Handle handle, PIN_Id pinId) {
     System_printf("Button pressed\n");
     System_flush();
 
-    flashLed = true;  // Aseta lippu LED-välähdyksen käynnistämiseksi LED-taskissa
-
     morseChar = ' ';
     programState = DATA_READY;  // Vaihda ohjelman tila
 }
 
-/* LED-välähdystaskin toteutus */
+
+
+/* LED-välähdystaskin toteutus. Ledi välähtää aina jos laite on vastaanottanut komennon */
 Void ledFlashTask(UArg arg0, UArg arg1) {
     while (1) {
-        if (flashLed) {
-            flashLed = false;  // Tyhjennä lippu, jotta välähdys ei toistu jatkuvasti
+        if (programState == DATA_READY) {
 
             // Sytytä LED
             PIN_setOutputValue(ledHandle, Board_LED1, 1);
@@ -123,7 +112,6 @@ Void ledFlashTask(UArg arg0, UArg arg1) {
 char receivedByte;  // Staattinen muuttuja vastaanotetulle tavulle
 char messageBuffer[100];
 int messageIndex = 0;
-volatile bool processMorse = false;
 
 void uartReadCallback(UART_Handle handle, size_t count) {
     if (count > 0) {
@@ -134,7 +122,7 @@ void uartReadCallback(UART_Handle handle, size_t count) {
 
         // Tarkista, onko viesti valmis
         if (receivedByte == '\n') {
-            processMorse = true;  // Aseta lippu Morse-koodin käsittelylle
+            programState = RECEIVING_DATA;  // Asetaan tila valmiiksi Morse-koodin käsittelylle
             messageIndex = 0;     // Nollaa viestipuskuri seuraavaa viestiä varten
         }
 
@@ -142,14 +130,14 @@ void uartReadCallback(UART_Handle handle, size_t count) {
     }
 }
 
-/* Morse-kooditaskin toteutus */
+/* Morse-kooditaskin toteutus, jossa viesti toistetaan laitteella */
 void morseCodeTask(UArg arg0, UArg arg1) {
 
     while (1) {
-        // Odota kunnes processMorse on asetettu uartReadCallback:ssä
-        if (processMorse) {
-            // Tyhjennä lippu estääksesi uudelleenkäsittelyn
-            processMorse = false;
+        // Odota kunnes tila on asetettu uartReadCallback:ssä
+        if (programState == RECEIVING_DATA) {
+            // Asetaan tila odotukseski estääksesi uudelleenkäsittelyn
+            programState = WAITING;
 
             // Avaa summeri Morse-koodin toistoa varten
             buzzerOpen(hBuzzer);
@@ -293,11 +281,16 @@ Void sensorTaskFxn(UArg arg0, UArg arg1) {
 
 Int main(void) {
 
-    // Task variables
+    // Taskien muuttujat
     Task_Handle sensorTaskHandle;
     Task_Params sensorTaskParams;
     Task_Handle uartTaskHandle;
     Task_Params uartTaskParams;
+    Task_Handle morseCodeTaskHandle;
+    Task_Params morseCodeTaskParams;
+    Task_Handle ledFlashTaskHandle;
+    Task_Params ledFlashTaskParams;
+
 
     // Initialize board
     Board_initGeneral();
@@ -308,22 +301,17 @@ Int main(void) {
         System_abort("Pin open failed!");
       }
 
-    // JTKJ: Teht�v� 2. Ota i2c-v�yl� k�ytt��n ohjelmassa
-    // JTKJ: Exercise 2. Initialize i2c bus
+    // Initializing i2c bus
     Board_initI2C();
 
-    // JTKJ: Teht�v� 4. Ota UART k�ytt��n ohjelmassa
-    // JTKJ: Exercise 4. Initialize UART
+    // Initializing UART
     Board_initUART();
     hMpuPin = PIN_open(&MpuPinState, MpuPinConfig);
         if (hMpuPin == NULL) {
             System_abort("Pin open failed!");
         }
 
-    // JTKJ: Teht�v� 1. Ota painonappi ja ledi ohjelman k�ytt��n
-    //       Muista rekister�id� keskeytyksen k�sittelij� painonapille
-    // JTKJ: Exercise 1. Open the button and led pins
-    //       Remember to register the above interrupt handler for button
+
     // Otetaan pinnit käyttöön ohjelmassa
        buttonHandle = PIN_open(&buttonState, buttonConfig);
        if(!buttonHandle) {
@@ -340,7 +328,7 @@ Int main(void) {
           System_abort("Error registering button callback function");
        }
 
-    /* Task */
+    /* Alustetaan sensorin tehtävän parametrit */
     Task_Params_init(&sensorTaskParams);
     sensorTaskParams.stackSize = STACKSIZE;
     sensorTaskParams.stack = &sensorTaskStack;
@@ -349,7 +337,7 @@ Int main(void) {
     if (sensorTaskHandle == NULL) {
         System_abort("Task create failed!");
     }
-
+    /* Alustetaan UART-tehtävän parametrit */
     Task_Params_init(&uartTaskParams);
     uartTaskParams.stackSize = STACKSIZE;
     uartTaskParams.stack = &uartTaskStack;
@@ -358,23 +346,24 @@ Int main(void) {
     if (uartTaskHandle == NULL) {
         System_abort("Task create failed!");
     }
-    /* Create the Morse code task */
-        Task_Params_init(&morseCodeTaskParams);
-        morseCodeTaskParams.stackSize = STACKSIZE;
-        morseCodeTaskParams.stack = &morseCodeTaskStack;
-        morseCodeTaskParams.priority = 2;  // Set appropriate priority
-        morseCodeTaskHandle = Task_create(morseCodeTask, &morseCodeTaskParams, NULL);
-        if (morseCodeTaskHandle == NULL) {
-            System_abort("Task create failed!");
-        }
-        Task_Params_init(&ledFlashTaskParams);
-        ledFlashTaskParams.stackSize = STACKSIZE;
-        ledFlashTaskParams.stack = &ledFlashTaskStack;
-        ledFlashTaskParams.priority = 1;  // Low-priority task
-        ledFlashTaskHandle = Task_create(ledFlashTask, &ledFlashTaskParams, NULL);
-        if (ledFlashTaskHandle == NULL) {
-            System_abort("LED Flash Task create failed!");
-        }
+    /* Luodaan Morse-koodin käsittelyyn liittyvä tehtävä */
+    Task_Params_init(&morseCodeTaskParams);
+    morseCodeTaskParams.stackSize = STACKSIZE;
+    morseCodeTaskParams.stack = &morseCodeTaskStack;
+    morseCodeTaskParams.priority = 2;
+    morseCodeTaskHandle = Task_create(morseCodeTask, &morseCodeTaskParams, NULL);
+    if (morseCodeTaskHandle == NULL) {
+        System_abort("Task create failed!");
+    }
+    /* Luodaan LED:n vilkutukseen liittyvä tehtävä */
+    Task_Params_init(&ledFlashTaskParams);
+    ledFlashTaskParams.stackSize = STACKSIZE;
+    ledFlashTaskParams.stack = &ledFlashTaskStack;
+    ledFlashTaskParams.priority = 1;
+    ledFlashTaskHandle = Task_create(ledFlashTask, &ledFlashTaskParams, NULL);
+    if (ledFlashTaskHandle == NULL) {
+        System_abort("LED Flash Task create failed!");
+    }
 
 
     /* Sanity check */
