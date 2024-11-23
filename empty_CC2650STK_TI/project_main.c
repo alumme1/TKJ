@@ -1,3 +1,9 @@
+/*
+ * JTK-harjoitustyö
+ * Petri Siira: Suunnittelu, toteutus ja testaus
+ * Atte Lumme: Suunnittelu, toteutus ja testaus*
+ */
+
 /* C Standard library */
 #include <stdio.h>
 
@@ -25,7 +31,7 @@
 
 
 
-#define STACKSIZE 2048 //Stackin koko
+#define STACKSIZE 2048 //SPinon koko
 #define ACC_Z_THRESHOLD 0.2  // Kiihtyvyysanturin Z-akselin kynnysarvo ylöspäin liikkeelle
 #define GYRO_X_THRESHOLD 150 // Gyroskoopin X-akselin kynnysarvo
 
@@ -109,22 +115,18 @@ Void ledFlashTask(UArg arg0, UArg arg1) {
     }
 }
 
-char receivedByte;  // Staattinen muuttuja vastaanotetulle tavulle
-char messageBuffer[100];
-int messageIndex = 0;
+char receivedByte;  // Muuttuja vastaanotetulle tavulle
+char messageBuffer[1]; //Puskuri merkeille
 
-void uartReadCallback(UART_Handle handle, size_t count) {
+void uart_ReadCallback(UART_Handle handle, size_t count) {
     if (count > 0) {
-        // Jos puskuri ei ole täynnä, lisää merkki puskuriin
-        if (messageIndex < sizeof(messageBuffer) - 1) {
-            messageBuffer[messageIndex++] = receivedByte;
-        }
-
-        // Tarkista, onko viesti valmis
-        if (receivedByte == '\n') {
-            programState = MESSAGE_RECEIVED;  // Asetaan tila valmiiksi Morse-koodin käsittelylle
-            messageIndex = 0;     // Nollaa viestipuskuri seuraavaa viestiä varten
-        }
+        if (receivedByte != '\r') {
+                if (receivedByte != '\n') {
+                    // Varastoidaan merkki bufferiin
+                    messageBuffer[0] = receivedByte;
+                    programState = MESSAGE_RECEIVED;  // Vaihdetaan tila merkin käsittelyä varten
+                }
+            }
 
         UART_read(handle, &receivedByte, 1);  // Aloita uuden merkin lukeminen
     }
@@ -134,34 +136,26 @@ void uartReadCallback(UART_Handle handle, size_t count) {
 void morseCodeTask(UArg arg0, UArg arg1) {
 
     while (1) {
-        // Odota kunnes tila on asetettu uartReadCallback:ssä
+        // Odota kunnes tila on asetettu uart_ReadCallback:ssä
         if (programState == MESSAGE_RECEIVED) {
             // Asetaan tila odotukseski estääksesi uudelleenkäsittelyn
             programState = WAITING;
-
-
-            int i = 0;
-            // Käsittele jokainen merkki messageBufferista ja piippaa vastaavasti
-            for (i = 0; messageBuffer[i] != '\0'; i++) {
-                if (messageBuffer[i] == '.') {
-                    // Lyhyt piippaus pisteelle
-                    buzzerSetFrequency(2000);
-                    Task_sleep(50000 / Clock_tickPeriod);
-                    buzzerSetFrequency(0);
-                    Task_sleep(50000 / Clock_tickPeriod);
-                } else if (messageBuffer[i] == '-') {
-                    // Pitkä piippaus viivalle
-                    buzzerSetFrequency(2000);
-                    Task_sleep(500000 / Clock_tickPeriod);
-                    buzzerSetFrequency(0);
-                    Task_sleep(50000 / Clock_tickPeriod);
-                } else if (messageBuffer[i] == ' ') {
-                    // Tauko merkkien välissä
-                    Task_sleep(300000 / Clock_tickPeriod);
-                }
+            if (messageBuffer[0] == '.') {
+                // Lyhyt piippaus pisteelle
+                buzzerSetFrequency(2000);
+                Task_sleep(50000 / Clock_tickPeriod);
+                buzzerSetFrequency(0);
+                Task_sleep(50000 / Clock_tickPeriod);
+            } else if (messageBuffer[0] == '-') {
+                // Pitkä piippaus viivalle
+                buzzerSetFrequency(2000);
+                Task_sleep(500000 / Clock_tickPeriod);
+                buzzerSetFrequency(0);
+                Task_sleep(50000 / Clock_tickPeriod);
+            } else if (messageBuffer[0] == ' ') {
+                // Tauko merkkien välissä
+                Task_sleep(300000 / Clock_tickPeriod);
             }
-
-
         }
         Task_sleep(10000);
     }
@@ -170,7 +164,6 @@ void morseCodeTask(UArg arg0, UArg arg1) {
 /* UART-taskin toteutus */
 Void uartTaskFxn(UArg arg0, UArg arg1) {
     char uartWriteBuffer[4];
-    char uartReadBuffer[1];  // Yhden tavun puskuriluku
     UART_Handle handle;
     UART_Params params;
 
@@ -183,7 +176,7 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
     params.writeDataMode = UART_DATA_TEXT;
     params.readEcho = UART_ECHO_OFF;
     params.readMode = UART_MODE_CALLBACK;
-    params.readCallback = uartReadCallback;
+    params.readCallback = uart_ReadCallback;
 
     handle = UART_open(Board_UART, &params);
     if (handle == NULL) {
@@ -191,12 +184,12 @@ Void uartTaskFxn(UArg arg0, UArg arg1) {
     }
 
     // Aloita yhden tavun lukeminen kerrallaan
-    UART_read(handle, uartReadBuffer, 1);
+    UART_read(handle, &receivedByte, 1);
 
     while (1) {
         if (programState == DATA_READY) {
             snprintf(uartWriteBuffer, sizeof(uartWriteBuffer), "%c\r\n\0", morseChar);;
-            System_printf("Sending to UART: %s", uartWriteBuffer);
+            System_printf("Lähetetään uart:iin %s", uartWriteBuffer);
             System_flush();
 
             UART_write(handle, uartWriteBuffer, strlen(uartWriteBuffer)+1);
@@ -245,7 +238,7 @@ Void sensorTaskFxn(UArg arg0, UArg arg1) {
 
         // Lue data MPU9250-sensorilta
         mpu9250_get_data(&i2cMPU, &ax, &ay, &az, &gx, &gy, &gz);
-        printf("%f, %f\n", az - 1, az + 1);
+
 
         // Tarkista Z-akselin kiihtyvyysarvo ylöspäin nykäisyn varalle
         if ((az - 1 > ACC_Z_THRESHOLD) || (az + 1 < -ACC_Z_THRESHOLD)) {
@@ -253,7 +246,6 @@ Void sensorTaskFxn(UArg arg0, UArg arg1) {
             // Päivitä ohjelman tila valmiiksi ledin välähdykselle ja merkin lähettämiselle
             programState = DATA_READY;
             // Toista lyhyt piippaus pisteelle
-
             buzzerSetFrequency(2000);
             Task_sleep(50000 / Clock_tickPeriod);
             buzzerSetFrequency(0);
@@ -269,7 +261,6 @@ Void sensorTaskFxn(UArg arg0, UArg arg1) {
             // Päivitä ohjelman tila valmiiksi ledin välähdykselle ja merkin lähettämiselle
             programState = DATA_READY;
             // Toista pitkä piippaus viivalle
-
             buzzerSetFrequency(2000);
             Task_sleep(400000 / Clock_tickPeriod);
             buzzerSetFrequency(0);
@@ -302,10 +293,10 @@ Int main(void) {
     
     //Otetaan buzzer käyttöön ohjelmassa ja avataan se
     buzzerHandle = PIN_open(&buzzerState, buzzerConfig);
-      if (buzzerHandle == NULL) {
-        System_abort("Pin open failed!");
-      }
-      buzzerOpen(buzzerHandle);
+        if (buzzerHandle == NULL) {
+            System_abort("Pin open failed!");
+          }
+          buzzerOpen(buzzerHandle);
 
     // Initializing i2c bus
     Board_initI2C();
